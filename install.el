@@ -57,6 +57,12 @@
 ;; expected to update their bootstrap snippet. We still create the
 ;; symlink, though, for backwards compatibility (this script should
 ;; work for all versions of straight.el, present and past).
+;;
+;; IMPORTANT: When referring to newly introduced variables in
+;; straight.el, *always* use `bound-and-true-p' so as to avoid
+;; regressions with old versions of straight.el that did not define
+;; those variables; see
+;; <https://github.com/raxod502/straight.el/issues/407>.
 
 ;; We have to wrap everything in a single form so that this file can
 ;; be evaluated with `eval-print-last-sexp', rather than
@@ -83,12 +89,17 @@
   (defvar url-http-end-of-headers)
   (defvar url-http-response-status)
 
-  (let (;; This needs to have a default value, just in case the user
-        ;; doesn't have any lockfiles.
-        (version :saturn)
+  ;; for windows os
+  (defun straight--windows-os-p ()
+    "Check if the current operating system is Windows."
+    (memq system-type '(ms-dos windows-nt cygwin)))
+
+  (let ((version nil)
         (straight-profiles (if (boundp 'straight-profiles)
                                straight-profiles
-                             '((nil . "default")))))
+                             '((nil . "default.el"))))
+        (straight-install-dir (or (bound-and-true-p straight-base-dir)
+                                  user-emacs-directory)))
     ;; The only permissible error here is for a lockfile to be absent
     ;; entirely. Anything else triggers an abort so that we don't
     ;; accidentally do something the user doesn't expect (like if they
@@ -96,7 +107,7 @@
     ;; the recipe specification, and forgot to update which repository
     ;; their init-file downloaded install.el from).
     (dolist (lockfile-name (mapcar #'cdr straight-profiles))
-      (let ((lockfile-path (concat user-emacs-directory
+      (let ((lockfile-path (concat straight-install-dir
                                    "straight/versions/"
                                    lockfile-name)))
         (when (file-exists-p lockfile-path)
@@ -121,6 +132,9 @@
             ;; are ignored by default by the debugger).
             (end-of-file
              (error "Malformed version lockfile: %S" lockfile-name))))))
+    (unless version
+      ;; If no lockfile present, use latest version.
+      (setq version :alpha))
     (with-current-buffer
         (url-retrieve-synchronously
          (format
@@ -144,24 +158,21 @@
        `(progn
           ;; Pass relevant variables into the child Emacs, if they
           ;; have been set.
-          ,@(cl-mapcan (lambda (variable)
-                         (when (boundp variable)
-                           `((setq ,variable ',(symbol-value variable)))))
-                       '(bootstrap-version
-                         straight-arrow
-                         straight-current-profile
-                         straight-default-vc
-                         straight-profiles
-                         straight-recipe-overrides
-                         straight-recipe-repositories
-                         straight-recipes-gnu-elpa-url
-                         straight-repository-branch
-                         straight-vc-git-default-branch
-                         straight-vc-git-default-protocol
-                         straight-vc-git-force-protocol
-                         straight-vc-git-primary-remote
-                         straight-vc-git-upstream-remote
-                         user-emacs-directory)))
+          ,@(let* ((vars nil)
+                   (regexps '("bootstrap-version"
+                              "straight-[a-z-]+"
+                              "user-emacs-directory"))
+                   (regexp (format "^\\(%s\\)$"
+                                   (mapconcat #'identity regexps "\\|"))))
+              (mapatoms
+               (lambda (sym)
+                 (when (and (boundp sym)
+                            (string-match-p regexp (symbol-name sym))
+                            (not (string-match-p "--" (symbol-name sym))))
+                   (push sym vars))))
+              (mapcar (lambda (var)
+                        `(setq ,var ',(symbol-value var)))
+                      vars)))
        (current-buffer))
       (goto-char (point-max))
       (print
@@ -173,8 +184,13 @@
           ;; skipping the build phase.)
           (straight-use-package-no-build
            `(straight :type git :host github
-                      :repo "raxod502/straight.el"
-                      :branch ,straight-repository-branch))
+                      :repo ,(format
+                              "%s/straight.el"
+                              (or (bound-and-true-p straight-repository-user)
+                                  "raxod502"))
+                      :branch ,(or (bound-and-true-p
+                                    straight-repository-branch)
+                                   "master")))
           (unless (and (boundp 'bootstrap-version)
                        (integerp bootstrap-version)
                        (>= bootstrap-version 3))
@@ -186,26 +202,30 @@
                    ;; This is a relative symlink. It won't break if you
                    ;; (for some silly reason) move your
                    ;; `user-emacs-directory'.
-                   (target (concat "repos/" local-repo "/bootstrap.el"))
-                   (linkname (concat user-emacs-directory
-                                     "straight/bootstrap.el")))
+                   (link-target (concat "repos/" local-repo "/bootstrap.el"))
+                   (link-name (concat straight-install-dir
+                                      "straight/bootstrap.el")))
               (ignore-errors
                 ;; If it's a directory, the linking will fail. Just let
                 ;; the user deal with it in that case, since they are
                 ;; doing something awfully weird.
-                (delete-file linkname))
+                (delete-file link-name))
               ;; Unfortunately, there appears to be no way to get
               ;; `make-symbolic-link' to overwrite an existing file,
               ;; like 'ln -sf'. Providing the OK-IF-ALREADY-EXISTS
               ;; argument just makes it fail silently in the case of an
               ;; existing file. That's why we have to `delete-file'
               ;; above.
-              (if straight-use-symlinks
-                  (make-symbolic-link target linkname)
-                (with-temp-file linkname
+              (if (bound-and-true-p straight-use-symlinks)
+                  (if (straight--windows-os-p)
+                      (call-process "cmd" nil nil nil "/c" "mklink"
+                                    (subst-char-in-string ?/ ?\\ link-name)
+                                    (subst-char-in-string ?/ ?\\ link-target))
+                    (make-symbolic-link link-target link-name))
+                (with-temp-file link-name
                   (print
                    `(load (expand-file-name
-                           ,target (file-name-directory load-file-name))
+                           ,link-target (file-name-directory load-file-name))
                           nil 'nomessage)
                    (current-buffer)))))))
        (current-buffer))
@@ -219,7 +239,7 @@
                              (expand-file-name
                               invocation-name invocation-directory))
                             (runemacs-binary-path
-                             (when (memq system-type '(windows-nt ms-dos))
+                             (when (straight--windows-os-p)
                                (expand-file-name
                                 "runemacs.exe" invocation-directory))))
                         (if (and runemacs-binary-path

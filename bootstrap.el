@@ -54,12 +54,15 @@
               nil 'nomessage 'nosuffix)
         (setq emacs-version-changed nil))
       (when emacs-version-changed
-        ;; Don't use the optional LOAD argument for
-        ;; `byte-compile-file' because it emits a message.
-        (byte-compile-file straight.el)
-        (load (expand-file-name (concat straight.el "c")
-                                default-directory)
-              nil 'nomessage 'nosuffix)))))
+        ;; In safe mode, sacrifice performance for safety.
+        (if (bound-and-true-p straight-safe-mode)
+            (load straight.el nil 'nomessage 'nosuffix)
+          ;; Don't use the optional LOAD argument for
+          ;; `byte-compile-file' because it emits a message.
+          (byte-compile-file straight.el)
+          (load (expand-file-name (concat straight.el "c")
+                                  default-directory)
+                nil 'nomessage 'nosuffix))))))
 
 ;; This assures the byte-compiler that we know what we are doing when
 ;; we reference functions and variables from straight.el below. It
@@ -70,12 +73,6 @@
 ;; In case this is a reinit, and straight.el was already loaded, we
 ;; have to explicitly clear the caches.
 (straight--reset-caches)
-
-;; Treat the first init as a transaction.
-(unless (and after-init-time (not (bound-and-true-p straight-treat-as-init)))
-  (add-hook 'after-init-hook #'straight-finalize-transaction)
-  (straight-begin-transaction)
-  (straight-mark-transaction-as-init))
 
 ;; We start by registering the default recipe repositories. This is
 ;; done first so that any dependencies of straight.el can be looked up
@@ -97,14 +94,20 @@
                                    :local-repo "elpa"
                                    :no-build t)))
 
-(straight-use-recipes '(emacsmirror :type git :host github
-                                    :repo "emacsmirror/epkgs"
-                                    :nonrecursive t
-                                    :no-build t))
+(if straight-recipes-emacsmirror-use-mirror
+    (straight-use-recipes
+     '(emacsmirror-mirror :type git :host github
+                          :repo "emacs-straight/emacsmirror-mirror"
+                          :no-build t))
+  (straight-use-recipes '(emacsmirror :type git :host github
+                                      :repo "emacsmirror/epkgs"
+                                      :nonrecursive t
+                                      :no-build t)))
 
 ;; Then we register (and build) straight.el itself.
 (straight-use-package `(straight :type git :host github
-                                 :repo "raxod502/straight.el"
+                                 :repo ,(format "%s/straight.el"
+                                                straight-repository-user)
                                  :files ("straight*.el")
                                  :branch ,straight-repository-branch))
 
