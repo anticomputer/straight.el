@@ -87,6 +87,7 @@ chat][gitter-badge]][gitter]
     + [The profile system](#the-profile-system)
   * [Packages and the init-file](#packages-and-the-init-file)
   * [Using `straight.el` to reproduce bugs](#using-straightel-to-reproduce-bugs)
+  * [Using `straight.el` to develop packages](#using-straightel-to-develop-packages)
   * [Integration with other packages](#integration-with-other-packages)
     + [Integration with `use-package`](#integration-with-use-package-1)
     + ["Integration" with `package.el`](#integration-with-packageel)
@@ -167,7 +168,7 @@ chat][gitter-badge]][gitter]
 
 ## Getting started
 
-> **Note: `straight.el` supports a minimum version of Emacs 24.4, and
+> **Note: `straight.el` supports a minimum version of Emacs 24.5, and
 > works on macOS, Windows, and most flavors of Linux.**
 
 First, place the following bootstrap code in your init-file:
@@ -2444,6 +2445,23 @@ Note that this will use the currently checked-out revisions of
 Projectile and all of its dependencies, so you should take note of
 those in order to make your bug report.
 
+### Using `straight.el` to develop packages
+
+The workflow for developing a package using `straight.el` is quite
+straightforward:
+* Add the package to your configuration as usual, via a call to
+  `straight-use-package`.
+* Use `M-x find-function` or a similar command to jump to the code you
+  wish to edit.
+* Edit the code.
+* Either evaluate the edited code using `M-x eval-buffer`, `M-x
+  eval-defun`, or a similar command, or just restart Emacs to pick up
+  your changes.
+* When you are satisfied with your changes, use [Magit] or just Git
+  directly in order to commit and possibly push them. I suggest using
+  [Forge] to create pull requests directly from Emacs, with Magit
+  integration.
+
 ### Integration with other packages
 #### Integration with `use-package`
 
@@ -2537,6 +2555,10 @@ it to install Org. This functionality is implemented using
 can disable it by setting the value of the variable `straight-fix-org`
 to nil.
 
+Please be careful with setting `straight-vc-git-default-clone-depth`,
+which may break some packages' installing processes such as `elfeed`
+that depend on `org`.
+
 #### Integration with Hydra
 
 See [the Hydra wiki][hydra-wiki-straight-entry].
@@ -2617,7 +2639,9 @@ branch in any fork:
     (setq straight-repository-branch "feat/my-cool-feature")
 
 Please try to follow the style of the surrounding code and
-documentation, but anything is welcome.
+documentation, but anything is welcome. All text, including comments
+and docstrings, should be formatted using Emacs' `M-x fill-paragraph`
+command (bound to `M-q` by default).
 
 We require that the linting pass on all new commits. You can check
 this easily by installing [Docker] and running
@@ -2963,6 +2987,7 @@ Note that the user option must be customized *before* the
 [emacswiki]: https://www.emacswiki.org/
 [epkg]: https://github.com/emacscollective/epkg
 [epkgs]: https://github.com/emacsmirror/epkgs
+[forge]: https://github.com/magit/forge
 [git-credential-cache]: https://git-scm.com/docs/git-credential-cache
 [gitter-badge]: https://badges.gitter.im/raxod502/straight.el.svg
 [gitter]: https://gitter.im/raxod502/straight.el

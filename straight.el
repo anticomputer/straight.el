@@ -6,7 +6,7 @@
 ;; Created: 1 Jan 2017
 ;; Homepage: https://github.com/raxod502/straight.el
 ;; Keywords: extensions
-;; Package-Requires: ((emacs "24.4"))
+;; Package-Requires: ((emacs "24.5"))
 ;; Version: prerelease
 
 ;;; Commentary:
@@ -1004,15 +1004,18 @@ cdrs are their END-FUNCs.
 
 If nil, no transaction is not live.")
 
-(defun straight--transaction-finalize-on-idle ()
-  "Schedule to finalize the current transaction on Emacs idle.
+(defun straight--transaction-finalize-at-top-level ()
+  "Schedule to finalize the current transaction when appropriate.
 This means that `straight--transaction-finalize' will be invoked
-using an idle timer. In batch mode, the transaction is finalized
-using `kill-emacs-hook' rather than an idle timer (because idle
-timers are not run in batch mode)."
+on `post-command-hook', and it will wait until control is
+returned to the top level before actually finalizing the
+transaction and removing itself from the hook again. In batch
+mode, the transaction is finalized using `kill-emacs-hook' rather
+than `post-command-hook' (because the latter is not run in batch
+mode)."
   (if noninteractive
       (add-hook 'kill-emacs-hook #'straight--transaction-finalize)
-    (run-with-idle-timer 0 nil #'straight--transaction-finalize)))
+    (add-hook 'post-command-hook #'straight--transaction-finalize)))
 
 (defun straight--transaction-finalize ()
   "Finalize the current transaction.
@@ -1022,16 +1025,13 @@ the functions recorded in it."
   ;; transaction yet. Instead, arrange to schedule another idle timer
   ;; once the user exits the recursive edit via one of the functions
   ;; listed below.
-  (if (zerop (recursion-depth))
-      (let ((alist straight--transaction-alist))
-        (setq straight--transaction-alist nil)
-        (dolist (func '(exit-recursive-edit abort-recursive-edit top-level))
-          (advice-remove func #'straight--transaction-finalize-on-idle))
-        (dolist (end-func (mapcar #'cdr alist))
-          (when end-func
-            (funcall end-func))))
-    (dolist (func '(exit-recursive-edit abort-recursive-edit top-level))
-      (advice-add func :before #'straight--transaction-finalize-on-idle))))
+  (when (zerop (recursion-depth))
+    (let ((alist straight--transaction-alist))
+      (setq straight--transaction-alist nil)
+      (remove-hook 'post-command-hook #'straight--transaction-finalize)
+      (dolist (end-func (mapcar #'cdr alist))
+        (when end-func
+          (funcall end-func))))))
 
 (cl-defun straight--transaction-exec (id &key now later manual)
   "Execute functions within a transaction.
@@ -1051,7 +1051,7 @@ transaction. In this case, the caller must do this itself."
   ;; started a transaction, but haven't yet finalized it. Don't
   ;; schedule more idle timers.
   (unless (or manual straight--transaction-alist)
-    (straight--transaction-finalize-on-idle))
+    (straight--transaction-finalize-at-top-level))
   (unless (assq id straight--transaction-alist)
     ;; Push to start of list. At the end, we'll read forward, thus in
     ;; reverse order.
@@ -1625,6 +1625,18 @@ prompt. Return non-nil if Magit was installed. DIRECTORY is as in
   (prog1 t
     (magit-status-setup-buffer directory)))
 
+(defun straight--recursive-edit ()
+  "Start a new recursive edit session.
+Make sure that other packages such as `server.el' don't cause us
+to loose our session."
+  ;; Don't mess up recursive straight.el operations. The wonderful
+  ;; thing about using our own variable is that since it's not
+  ;; buffer-local, a recursive binding to nil is actually able to
+  ;; undo the effects of the ambient binding.
+  (cl-letf (((symbol-function 'top-level) #'ignore)
+            (straight--default-directory nil))
+    (recursive-edit)))
+
 (defun straight-vc-git--popup-raw (prompt actions)
   "Same as `straight--popup-raw', but specialized for vc-git methods.
 Two additional actions are inserted at the end of the list: \"e\"
@@ -1638,14 +1650,12 @@ edit. Otherwise, PROMPT and ACTIONS are as for
     '(("e" "Dired and open recursive edit"
        (lambda ()
          (dired (or straight--default-directory default-directory))
-         (let ((straight--default-directory nil))
-           (recursive-edit))))
+         (straight--recursive-edit)))
       ("g" "Magit and open recursive edit"
        (lambda ()
          (when (straight--magit-status
                 (or straight--default-directory default-directory))
-           (let ((straight--default-directory nil))
-             (recursive-edit)))))))))
+           (straight--recursive-edit))))))))
 
 (defmacro straight-vc-git--popup (prompt &rest actions)
   "Same as `straight--popup', but specialized for vc-git methods.
@@ -1659,17 +1669,11 @@ edit. Otherwise, PROMPT and ACTIONS are as for
      ,@actions
      ("e" "Dired and open recursive edit"
       (dired (or straight--default-directory default-directory))
-      ;; Don't mess up recursive straight.el operations. The wonderful
-      ;; thing about using our own variable is that since it's not
-      ;; buffer-local, a recursive binding to nil is actually able to
-      ;; undo the effects of the ambient binding.
-      (let ((straight--default-directory nil))
-        (recursive-edit)))
+      (straight--recursive-edit))
      ("g" "Magit and open recursive edit"
       (when (straight--magit-status
              (or straight--default-directory default-directory))
-        (let ((straight--default-directory nil))
-          (recursive-edit))))))
+        (straight--recursive-edit)))))
 
 (defun straight-vc-git--encode-url (repo host &optional protocol)
   "Generate a URL from a REPO depending on the value of HOST and PROTOCOL.
@@ -2750,13 +2754,18 @@ much faster than cloning the official Emacsmirror."
 PACKAGE should be a symbol. If the package is available from
 Emacsmirror, return a MELPA-style recipe; otherwise return nil."
   (cl-block nil
-    (dolist (org '("mirror" "attic"))
-      (with-temp-buffer
-        (insert-file-contents-literally org)
-        (when (re-search-forward (format "^%S\r?$" package) nil 'noerror)
-          (cl-return
-           `(,package :type git :host github
-                      :repo ,(format "emacs%s/%S" org package))))))))
+    (let ((mirror-package (intern
+                           (replace-regexp-in-string
+                            "\\+" "-plus" (symbol-name package)
+                            'fixedcase 'literal))))
+      (dolist (org '("mirror" "attic"))
+        (with-temp-buffer
+          (insert-file-contents-literally org)
+          (when (re-search-forward
+                 (format "^%S\r?$" mirror-package) nil 'noerror)
+            (cl-return
+             `(,package :type git :host github
+                        :repo ,(format "emacs%s/%S" org mirror-package)))))))))
 
 (defun straight-recipes-emacsmirror-mirror-list ()
   "Return a list of recipes available in Emacsmirror, as a list of strings."
@@ -2764,9 +2773,17 @@ Emacsmirror, return a MELPA-style recipe; otherwise return nil."
     (dolist (org '("mirror" "attic"))
       (with-temp-buffer
         (insert-file-contents-literally org)
-        (setq packages (nconc (split-string (buffer-string) "\n" 'omit-nulls)
+        (setq packages (nconc (mapcar
+                               (lambda (package)
+                                 (replace-regexp-in-string
+                                  "-plus\\b" "+" package 'fixedcase 'literal))
+                               (split-string (buffer-string) "\n" 'omit-nulls))
                               packages))))
     packages))
+
+(defun straight-recipes-emacsmirror-mirror-version ()
+  "Return the current version of the Emacsmirror mirror retriever."
+  2)
 
 ;;;;;;; Emacsmirror source
 
@@ -2804,7 +2821,7 @@ Emacsmirror, return a MELPA-style recipe; otherwise return nil."
 
 (defun straight-recipes-emacsmirror-version ()
   "Return the current version of the Emacsmirror retriever."
-  1)
+  2)
 
 ;;;;; Recipe conversion
 
@@ -3564,6 +3581,11 @@ modified since their last builds.")
                   ;; directories from being traversed and then checks
                   ;; for any files that are in a given local
                   ;; repository *and* have a new enough mtime.
+                  ;;
+                  ;; See the following issue for an explanation about
+                  ;; why an extra pair of single quotes is used on
+                  ;; Windows:
+                  ;; <https://github.com/raxod502/straight.el/issues/393>
                   (let ((newer-or-newermt nil)
                         (mtime-or-file nil))
                     (if (straight--find-supports 'newermt)
@@ -3577,7 +3599,10 @@ modified since their last builds.")
                           (append (list "-o"
                                         "-path"
                                         (expand-file-name
-                                         "*" (straight--repos-dir local-repo))
+                                         (if (eq system-type 'windows-nt)
+                                             "'*'"
+                                           "*")
+                                         (straight--repos-dir local-repo))
                                         newer-or-newermt
                                         mtime-or-file
                                         "-print")
@@ -4528,7 +4553,7 @@ The default value is \"Processing\"."
                          (cl-return-from loop))
                         ("e" "Dired and open recursive edit"
                          (dired (straight--repos-dir local-repo))
-                         (recursive-edit))
+                         (straight--recursive-edit))
                         ("C-g" (concat "Stop immediately and do not process "
                                        "more repositories")
                          (keyboard-quit))))))
